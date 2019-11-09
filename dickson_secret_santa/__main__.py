@@ -3,6 +3,7 @@ import sys
 import random
 import csv
 import time
+import boto3
 
 def main():
     arg_parser = argparse.ArgumentParser(description='Generates a list of people pairings for a secret santa exchange.')
@@ -20,6 +21,18 @@ def main():
         dest='no_reversal_match',
         action='store_true'
     )
+    arg_parser.add_argument(
+        '-s', '--send',
+        help='send text message to gifters about their giftee',
+        dest='send',
+        action='store_true'
+    )
+    arg_parser.add_argument(
+        '-d', '--dry-run',
+        help='does not use aws resources, instead prints to console',
+        dest='dry_run',
+        action='store_true'
+    )
     args = arg_parser.parse_args()
 
     people = load_people(args.file)
@@ -28,8 +41,40 @@ def main():
     if not matches:
         print("no matches found")
         return
+    if args.send:
+        if args.no_family_match:
+            people_by_household = construct_households(people)
+        sns_client = boto3.client('sns', region_name='us-east-1')
+        send_sms(sns_client, matches, people_by_household, args.dry_run)
+
+def construct_households(people):
+    people_by_household = {}
+    for person in people:
+        if person.family in people_by_household:
+            people_by_household[person.family].append(person)
+        else:
+            people_by_household[person.family] = [person]
+    return people_by_household
+
+def send_sms(sns_client, matches, people_by_household, dry_run):
     for giftee, gifter in matches.items():
-        print("{} gives to {}".format(gifter, giftee))
+        if people_by_household:
+            people_in_household = people_by_household[gifter.family]
+            household_names = '\nYou cannot be matched with anyone in your "household group". So feel free to plan your gifts with: {}. '.format(
+                ', '.join(map(lambda x: str(x), filter(lambda x: x is not gifter, people_in_household))))
+        information = 'Reach out to Liam with any questions.'
+        message = '🎅❄️ Secret Santa ❄️🎅\n\n{gifter}, your match is {giftee}!\n{household_names}{information}'.format(
+            gifter=gifter, giftee=giftee, household_names=household_names or "", information=information)
+        message_attribtues = {
+            "AWS.SNS.SMS.MaxPrice": {
+                "DataType": "Number",
+                "StringValue": "10.00"
+            }
+        }
+        if dry_run:
+            print("To phone: {}\n--------\n{}\n--------".format(gifter.phone, message))
+        else:
+            sns_client.publish(PhoneNumber=gifter.phone, Message=message, MessageAttributes=message_attribtues)
 
 def calculate_gift_pairs(gifters, giftees, no_family_match, no_reversal_match, matches = {}, gifter_index = 0):
     if gifter_index >= len(gifters):
@@ -56,26 +101,30 @@ def load_people(filename):
     with open(filename) as people_file:
         reader = csv.reader(people_file, skipinitialspace=True)
         for row in reader:
-            if len(row) != 2:
-                print("{} has incorrect format: expecting name, family name.".format(row), file=sys.stderr)
-                continue
+            if len(row) < 2 or len(row) > 3:
+                raise ValueError("{} has incorrect format: expecting name, family name, phone number.".format(row))
 
-            name, family = row
-            person = Person(name, family)
+            if len(row) == 3:
+                name, family, phone = row
+            else:
+                phone = None
+                name, family = row
+            person = Person(name, family, phone)
 
             people.append(person)
     return people
 
 class Person():
-    def __init__(self, name, family):
+    def __init__(self, name, family, phone):
         self.name = name
         self.family = family
+        self.phone = phone
 
     def __str__(self):
         return self.name
 
     def __repr__(self):
-        return "{name} ({family})".format(name=self.name, family=self.family)
+        return "{name} ({family}), tel: {phone}".format(name=self.name, family=self.family, phone=self.phone)
 
 if __name__ == '__main__':
     main()

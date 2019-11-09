@@ -2,23 +2,23 @@ Secret Santa Generator
 
 Participants file should look like the following:
 
-`First Name, Family Name (Used to separate families)`
+`First Name, Family Name (Used to separate families), Phone Number (optional)`
 
 ```
-Liam, Li Dickson
-Eileen, Li Dickson
-Tim, Tim Dickson
-Lydia, Tim Dickson
-Chris, Chris Dickson
-Rob, Song Dickson
-Kyoung-Hi, Song Dickson
-Mina, Song Dickson
-Carol, Deasy Dickson
-Kim, Deasy Dickson
-Jeff, Klotzkin Dickson
-Jeanine, Klotzkin Dickson
-Eliza, Klotzkin Dickson
-Kyle, Klotzkin Dickson
+Liam, Li Dickson, 15555555
+Eileen, Li Dickson, 15555555
+Tim, Tim Dickson, 15555555
+Lydia, Tim Dickson, 15555555
+Chris, Chris Dickson, 15555555
+Rob, Song Dickson, 15555555
+Kyoung-Hi, Song Dickson, 15555555
+Mina, Song Dickson, 15555555
+Carol, Deasy Dickson, 15555555
+Kim, Deasy Dickson, 15555555
+Jeff, Klotzkin Dickson, 15555555
+Jeanine, Klotzkin Dickson, 15555555
+Eliza, Klotzkin Dickson, 15555555
+Kyle, Klotzkin Dickson, 15555555
 ```
 
 Run the script with

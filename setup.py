@@ -18,6 +18,7 @@ setup(
     license='Apache Software License',
     packages=['dickson-secret-santa'],
     keywords=['secret santa', 'gift exchange',],
+    requries=['boto3'],
     entry_points={
         'console_scripts': [
             'dickson_secret_santa=dickson_secret_santa.__main__:main',
