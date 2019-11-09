@@ -46,6 +46,12 @@ def main():
             people_by_household = construct_households(people)
         sns_client = boto3.client('sns', region_name='us-east-1')
         send_sms(sns_client, matches, people_by_household, args.dry_run)
+    print_audit_log(args.file + '.audit', matches)
+
+def print_audit_log(audit_log_file, matches):
+    with open(audit_log_file, 'w') as audit_file:
+        for giftee, gifter in matches.items():
+            print('gifter:{} giftee:{}'.format(gifter, giftee), file=audit_file)
 
 def construct_households(people):
     people_by_household = {}
@@ -58,12 +64,15 @@ def construct_households(people):
 
 def send_sms(sns_client, matches, people_by_household, dry_run):
     for giftee, gifter in matches.items():
+        household_names = None
         if people_by_household:
             people_in_household = people_by_household[gifter.family]
-            household_names = '\nYou cannot be matched with anyone in your "household group". So feel free to plan your gifts with: {}. '.format(
-                ', '.join(map(lambda x: str(x), filter(lambda x: x is not gifter, people_in_household))))
+            household_excluding_gifter = list(map(lambda x: str(x), filter(lambda x: x is not gifter, people_in_household)))
+            if household_excluding_gifter:
+                household_names = 'You cannot be matched with anyone in your "household group". So feel free to plan your gifts with: {}. '.format(
+                    ', '.join(household_excluding_gifter))
         information = 'Reach out to Liam with any questions.'
-        message = '🎅❄️ Secret Santa ❄️🎅\n\n{gifter}, your match is {giftee}!\n{household_names}{information}'.format(
+        message = '🎅❄️ Secret Santa ❄️🎅\n\n{gifter}, your match is {giftee}!\n\n{household_names}{information}'.format(
             gifter=gifter, giftee=giftee, household_names=household_names or "", information=information)
         message_attribtues = {
             "AWS.SNS.SMS.MaxPrice": {
