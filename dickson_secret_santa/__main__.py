@@ -114,9 +114,12 @@ def run(args):
     print(build_message(sample, Person("<their match>", ""), by_household, args.note))
     if os.path.exists(audit_path):
         audit = Audit.load(audit_path)
-        sent = len(audit.entries) - len(audit.unsent())
-        print(f"\n{audit_path}: {sent} of {len(audit.entries)} texts sent. "
-              "Run --send to finish or --status to check delivery.")
+        total, unsent = len(audit.entries), len(audit.unsent())
+        if unsent:
+            print(f"\n{audit_path}: {total - unsent} of {total} texts sent. "
+                  "Run --send to finish.")
+        else:
+            print(f"\n{audit_path}: All {total} texts sent. Run --status to check delivery.")
     else:
         print("\nLooks good. Run with --send to text everyone.")
     return 0

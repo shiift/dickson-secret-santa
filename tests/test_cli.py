@@ -222,7 +222,11 @@ class OtherModeTests(CliTestCase):
         FakeTextbelt.failing = {self.phone_of("Carol")}
         self.run_cli("--send")
         code, out = self.run_cli()
-        self.assertIn("12 of 13 texts sent", out)
+        self.assertIn("12 of 13 texts sent. Run --send to finish", out)
+        FakeTextbelt.failing = set()
+        self.run_cli("--send")
+        code, out = self.run_cli()
+        self.assertIn("All 13 texts sent. Run --status", out)
 
     def test_test_email_never_saves_pairings(self):
         with mock.patch("smtplib.SMTP") as smtp_cls, mock.patch.dict(
@@ -244,7 +248,8 @@ class OtherModeTests(CliTestCase):
         self.assertEqual(load_previous_pairs(legacy), {("liam", "carol"), ("carol", "tim")})
         code, out = self.run_cli("--avoid", self.audit, "--avoid", legacy)
         self.assertEqual(code, 0, out)
-        self.assertIn("Avoiding 15 pairings", out)
+        expected = len(new_pairs | load_previous_pairs(legacy))  # draws can overlap
+        self.assertIn(f"Avoiding {expected} pairings", out)
 
     def test_audit_file_is_valid_json_after_each_send(self):
         seen = []
