@@ -3,6 +3,7 @@ import os
 import random
 import tempfile
 import unittest
+from unittest import mock
 
 from dickson_secret_santa.santa import (
     NoPairingError, PairingRules, Person, build_message, generate_pairs,
@@ -102,6 +103,16 @@ class CliTests(unittest.TestCase):
             self.assertEqual(
                 main([EXAMPLE, "--resend", "liam", "--dry-run", "--audit", audit]), 0)
             self.assertEqual(load_previous_pairs(audit), {("liam", "carol")})
+
+    def test_test_email_never_saves_pairings(self):
+        with tempfile.TemporaryDirectory() as d:
+            audit = os.path.join(d, "x.audit")
+            with mock.patch("smtplib.SMTP") as smtp_cls, mock.patch.dict(
+                    os.environ, {"SMTP_USER": "me@gmail.com", "SMTP_PASSWORD": "pw"}):
+                self.assertEqual(
+                    main([EXAMPLE, "--test-email", "me+test@gmail.com", "--audit", audit]), 0)
+            self.assertEqual(smtp_cls.return_value.send_message.call_count, 13)
+            self.assertFalse(os.path.exists(audit))
 
     def test_check_only(self):
         self.assertEqual(main([EXAMPLE]), 0)

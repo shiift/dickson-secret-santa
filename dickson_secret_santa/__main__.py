@@ -6,9 +6,9 @@ import sys
 
 from .santa import (
     Person, PairingRules, NoPairingError, build_message, generate_pairs,
-    households, load_people, load_previous_pairs, normalize_phone,
+    households, load_people, load_previous_pairs,
 )
-from .sms import ConsoleSender, SendError, TextbeltSender
+from .sms import ConsoleSender, EmailSender, SendError, TextbeltSender
 
 
 def parse_args(argv=None):
@@ -36,8 +36,9 @@ def parse_args(argv=None):
     act = p.add_argument_group("actions (pick one)").add_mutually_exclusive_group()
     act.add_argument("--send", action="store_true",
                      help="generate pairings, save the audit file, and text everyone")
-    act.add_argument("--test-to", metavar="PHONE",
-                     help="text a sample message with a made-up match to PHONE")
+    act.add_argument("--test-email", metavar="ADDRESS",
+                     help="trial run: draw throwaway pairings and email every would-be "
+                          "text to ADDRESS instead of texting (needs SMTP_* env vars)")
     act.add_argument("--resend", metavar="NAME",
                      help="re-text NAME their match from the saved audit file")
     act.add_argument("--reveal", action="store_true",
@@ -48,7 +49,7 @@ def parse_args(argv=None):
     p.add_argument("--force", action="store_true",
                    help="overwrite an existing audit file when sending")
     p.add_argument("--dry-run", action="store_true",
-                   help="with --send/--test-to/--resend, print texts instead of sending")
+                   help="with --send/--test-email/--resend, print messages instead of sending")
     return p.parse_args(argv)
 
 
@@ -73,15 +74,6 @@ def run(args):
     if args.resend:
         return resend(args, people, by_household, audit_path, get_sender())
 
-    if args.test_to:
-        phone = normalize_phone(args.test_to)
-        tester = Person("Test", "__test__", phone)
-        message = build_message(tester, Person("Santa Claus", "North Pole"),
-                                {}, args.organizer, args.note)
-        text_id = get_sender().send(phone, "[TEST] " + message)
-        print(f"Test text sent to {phone} (id {text_id}).")
-        return 0
-
     avoid = set()
     for f in args.avoid:
         avoid |= load_previous_pairs(f)
@@ -94,6 +86,15 @@ def run(args):
         for gifter, giftee in sorted(pairs.items(), key=lambda kv: kv[0].name):
             print(f"  {gifter.name} -> {giftee.name}")
         return 0
+
+    if args.test_email:
+        test_sender = sender or EmailSender(args.test_email)
+        print(f"\nTrial run: emailing {len(pairs)} would-be texts to {args.test_email}. "
+              "These pairings are throwaway and are not saved.")
+        try:
+            return deliver(args, pairs, by_household, test_sender)
+        finally:
+            getattr(test_sender, "close", lambda: None)()
 
     if not args.send:
         sample = random.choice(people)
@@ -138,6 +139,10 @@ def send_all(args, people, by_household, pairs, audit_path, sender):
                 print(f"gifter:{gifter.name} giftee:{giftee.name}", file=f)
         print(f"Saved pairings to {audit_path} (don't peek if you're playing!)")
 
+    return deliver(args, pairs, by_household, sender)
+
+
+def deliver(args, pairs, by_household, sender):
     failures = []
     for gifter, giftee in pairs.items():
         message = build_message(gifter, giftee, by_household, args.organizer, args.note)
@@ -149,10 +154,10 @@ def send_all(args, people, by_household, pairs, audit_path, sender):
             print(f"  FAILED for {gifter.name}: {e}", file=sys.stderr)
 
     if failures:
-        print(f"\n{len(failures)} text(s) failed. Retry each with: --resend NAME",
-              file=sys.stderr)
+        hint = " Retry each with: --resend NAME" if args.send else ""
+        print(f"\n{len(failures)} message(s) failed.{hint}", file=sys.stderr)
         return 1
-    print(f"\nAll {len(pairs)} texts sent.")
+    print(f"\nAll {len(pairs)} messages sent.")
     return 0
 
 

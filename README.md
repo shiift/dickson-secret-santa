@@ -18,6 +18,13 @@ Draws secret santa pairings for the family and texts each person their match.
    with `#` are ignored. Phone numbers can be `206-555-0101` or `+12065550101`.
 2. Buy a Textbelt key (about $3 for 50 texts) and export it:
    `export TEXTBELT_KEY=...`
+3. For trial runs by email, export SMTP settings. For Gmail, create an
+   [app password](https://myaccount.google.com/apppasswords) (needs 2-step
+   verification):
+   ```sh
+   export SMTP_USER=you@gmail.com SMTP_PASSWORD=your-app-password
+   # optional: SMTP_HOST (default smtp.gmail.com), SMTP_PORT (587), SMTP_FROM
+   ```
 
 ## Usage
 
@@ -25,8 +32,9 @@ Draws secret santa pairings for the family and texts each person their match.
 # Check the list and confirm everyone can be paired. Nothing is sent or shown.
 python3 -m dickson_secret_santa participants.csv --note "Budget is about \$50."
 
-# Send yourself a sample text with a made-up match.
-python3 -m dickson_secret_santa participants.csv --test-to 206-555-0112
+# Trial run: draw throwaway pairings and email every would-be text to you.
+# Nothing is texted and nothing is saved, so the real draw stays a surprise.
+python3 -m dickson_secret_santa participants.example.csv --test-email you+test@gmail.com
 
 # Send for real. Pairings are saved to participants.csv.<year>.audit first.
 python3 -m dickson_secret_santa participants.csv --send --note "Budget is about \$50."
@@ -38,7 +46,7 @@ python3 -m dickson_secret_santa participants.csv --resend Carol
 python3 -m dickson_secret_santa participants.csv --send --avoid participants.csv.2026.audit
 ```
 
-Add `--dry-run` to `--send`, `--test-to` or `--resend` to print the texts instead
+Add `--dry-run` to `--send`, `--test-email` or `--resend` to print the texts instead
 of sending them. Note that this shows the real matches, including your own.
 `--reveal` prints every pairing without sending anything.
 
