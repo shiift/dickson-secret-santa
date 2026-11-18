@@ -65,17 +65,6 @@ def households(people):
     return groups
 
 
-def load_previous_pairs(audit_file):
-    """Read (gifter, giftee) name pairs from a previous year's audit file."""
-    pairs = set()
-    with open(audit_file) as f:
-        for line in f:
-            m = re.match(r"gifter:(.+?) giftee:(.+)$", line.strip())
-            if m:
-                pairs.add((m.group(1).lower(), m.group(2).lower()))
-    return pairs
-
-
 class PairingRules:
     def __init__(self, allow_family=False, allow_reversals=False, avoid_pairs=()):
         self.allow_family = allow_family
@@ -153,20 +142,54 @@ def _exhaustive_search(people, rules, rng):
     return dict(assignment) if solve(0) else None
 
 
-def build_message(gifter, giftee, people_by_household, organizer, note=None):
+MAX_SEGMENTS = 2
+
+
+def build_message(gifter, giftee, people_by_household, note=None):
     housemates = [p.name for p in people_by_household.get(gifter.family, []) if p != gifter]
-    parts = [
-        "🎅❄️ Secret Santa ❄️🎅",
-        f"{gifter.name}, your match is {giftee.name}!",
-    ]
+    lines = [f"🎅 Secret Santa: {gifter.name}, your match is {giftee.name}!"]
     if housemates:
-        parts.append(
-            "You won't be matched with anyone in your household, so feel free "
-            f"to plan gifts with {_join_names(housemates)}.")
+        lines.append(f"You can plan with {_join_names(housemates)}.")
     if note:
-        parts.append(note)
-    parts.append(f"Reach out to {organizer} with any questions.")
-    return "\n\n".join(parts)
+        lines.append(note)
+    return "\n".join(lines)
+
+
+# GSM-7 is the 160-character SMS alphabet. Anything outside it (like an emoji)
+# switches the whole text to UCS-2, which fits 70 characters per segment.
+_GSM7_BASIC = set(
+    "@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !\"#¤%&'()*+,-./0123456789:;<=>?"
+    "¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà")
+_GSM7_EXTENDED = set("^{}\\[~]|€\f")
+
+
+def sms_segments(text):
+    """How many SMS segments a carrier will split `text` into."""
+    if all(c in _GSM7_BASIC or c in _GSM7_EXTENDED for c in text):
+        units = sum(2 if c in _GSM7_EXTENDED else 1 for c in text)
+        single, multi = 160, 153
+    else:
+        units = len(text.encode("utf-16-le")) // 2  # emoji count as 2
+        single, multi = 70, 67
+    return 1 if units <= single else -(-units // multi)
+
+
+def longest_message(people, rules, people_by_household, note=None):
+    """The longest text any allowed pairing could produce, and its segment count."""
+    worst = max(
+        (build_message(g, r, people_by_household, note)
+         for g in people for r in people if rules.allowed(g, r)),
+        key=lambda text: (sms_segments(text), len(text)))
+    return worst, sms_segments(worst)
+
+
+def check_message_length(people, rules, people_by_household, note=None):
+    text, segments = longest_message(people, rules, people_by_household, note)
+    if segments > MAX_SEGMENTS:
+        raise ValueError(
+            f"The longest text would be {segments} SMS segments (limit {MAX_SEGMENTS}); "
+            f"shorten --note. Longest text:\n{text}")
+    return segments
 
 
 def _join_names(names):

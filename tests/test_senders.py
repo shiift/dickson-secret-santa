@@ -5,7 +5,7 @@ import unittest
 import urllib.parse
 from unittest import mock
 
-from dickson_secret_santa.sms import EmailSender, SendError, TextbeltSender
+from dickson_secret_santa.senders import EmailSender, SendError, TextbeltSender
 
 
 def fake_response(payload):
@@ -36,6 +36,18 @@ class TextbeltTests(unittest.TestCase):
                         return_value=fake_response({"success": True, "quotaRemaining": 37})):
             self.assertEqual(TextbeltSender("k").quota_remaining(), 37)
 
+    def test_delivery_status(self):
+        with mock.patch("urllib.request.urlopen",
+                        return_value=fake_response({"status": "DELIVERED"})) as m:
+            self.assertEqual(TextbeltSender("k").delivery_status("42"), "DELIVERED")
+        self.assertEqual(m.call_args[0][0].full_url, "https://textbelt.com/status/42")
+
+    def test_bad_key_on_quota(self):
+        with mock.patch("urllib.request.urlopen",
+                        return_value=fake_response({"success": False, "error": "Bad key"})):
+            with self.assertRaisesRegex(SendError, "Bad key"):
+                TextbeltSender("k").quota_remaining()
+
     def test_missing_key(self):
         with self.assertRaises(SendError):
             TextbeltSender(None)
@@ -46,10 +58,9 @@ class EmailTests(unittest.TestCase):
 
     def test_emails_reuse_one_connection(self):
         with mock.patch("smtplib.SMTP") as smtp_cls:
-            sender = EmailSender("test@example.com", env=self.ENV)
-            sender.send("+12065550101", "Rob, your match is Kyle!")
-            sender.send(None, "Carol, your match is Tim!")
-            sender.close()
+            with EmailSender("test@example.com", env=self.ENV) as sender:
+                sender.send("+12065550101", "Rob, your match is Kyle!")
+                sender.send(None, "Carol, your match is Tim!")
         smtp_cls.assert_called_once_with("smtp.gmail.com", 587, timeout=30)
         conn = smtp_cls.return_value
         conn.starttls.assert_called_once()

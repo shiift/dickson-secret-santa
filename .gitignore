@@ -110,4 +110,5 @@ venv.bak/
 .vscode
 dickson_family.txt*
 participants.csv*
+.audit-*
 fam.txt*

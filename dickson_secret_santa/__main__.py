@@ -4,11 +4,12 @@ import os
 import random
 import sys
 
+from .audit import FAILED, SENT, Audit, load_previous_pairs
 from .santa import (
-    Person, PairingRules, NoPairingError, build_message, generate_pairs,
-    households, load_people, load_previous_pairs,
+    MAX_SEGMENTS, NoPairingError, PairingRules, Person, build_message,
+    check_message_length, generate_pairs, households, load_people, sms_segments,
 )
-from .sms import ConsoleSender, EmailSender, SendError, TextbeltSender
+from .senders import ConsoleSender, EmailSender, SendError, TextbeltSender
 
 
 def parse_args(argv=None):
@@ -28,28 +29,30 @@ def parse_args(argv=None):
                        help="avoid repeating pairings from a previous year's audit file "
                             "(repeatable)")
 
-    msg = p.add_argument_group("message")
-    msg.add_argument("--organizer", default="Liam",
-                     help="name people should contact with questions (default: Liam)")
-    msg.add_argument("--note", help="extra line for the text, e.g. 'Budget is $50.'")
+    p.add_argument("--note", help="extra line for the text, e.g. 'Budget is $50.' "
+                                  "Saved in the audit file and reused on reruns.")
 
     act = p.add_argument_group("actions (pick one)").add_mutually_exclusive_group()
     act.add_argument("--send", action="store_true",
-                     help="generate pairings, save the audit file, and text everyone")
+                     help="draw pairings, save the audit file, and text everyone. "
+                          "Rerunning only texts people who haven't been sent theirs.")
     act.add_argument("--test-email", metavar="ADDRESS",
                      help="trial run: draw throwaway pairings and email every would-be "
                           "text to ADDRESS instead of texting (needs SMTP_* env vars)")
     act.add_argument("--resend", metavar="NAME",
-                     help="re-text NAME their match from the saved audit file")
+                     help="re-text NAME their saved match, even if it was already sent")
+    act.add_argument("--status", action="store_true",
+                     help="check with Textbelt whether each saved text was delivered")
     act.add_argument("--reveal", action="store_true",
-                     help="print every pairing to the console (spoils it for you!)")
+                     help="print the saved pairings (spoils it if you're playing!)")
 
     p.add_argument("--audit", metavar="PATH",
-                   help="audit file location (default: FILE.<year>.audit)")
+                   help="audit file location (default: FILE.<year>.audit.json)")
     p.add_argument("--force", action="store_true",
-                   help="overwrite an existing audit file when sending")
+                   help="with --send, throw away the existing audit file and redraw")
     p.add_argument("--dry-run", action="store_true",
-                   help="with --send/--test-email/--resend, print messages instead of sending")
+                   help="with --send or --resend, print texts instead of sending them "
+                        "(and save nothing)")
     return p.parse_args(argv)
 
 
@@ -65,46 +68,58 @@ def main(argv=None):
 def run(args):
     people = load_people(args.file)
     by_household = households(people)
-    audit_path = args.audit or f"{args.file}.{datetime.date.today().year}.audit"
-    sender = ConsoleSender() if args.dry_run else None
+    audit_path = args.audit or f"{args.file}.{datetime.date.today().year}.audit.json"
 
-    def get_sender():
-        return sender or TextbeltSender(os.environ.get("TEXTBELT_KEY"))
+    def textbelt():
+        if args.dry_run:
+            return ConsoleSender()
+        return TextbeltSender(os.environ.get("TEXTBELT_KEY"))
 
     if args.resend:
-        return resend(args, people, by_household, audit_path, get_sender())
+        with textbelt() as sender:
+            return resend(args, people, by_household, audit_path, sender)
+    if args.status:
+        with TextbeltSender(os.environ.get("TEXTBELT_KEY")) as sender:
+            return check_status(audit_path, sender)
+    if args.reveal:
+        return reveal(audit_path)
 
     avoid = set()
     for f in args.avoid:
         avoid |= load_previous_pairs(f)
     rules = PairingRules(args.allow_family_match, args.allow_reversals, avoid)
+
+    if args.send and not args.dry_run:
+        with textbelt() as sender:
+            return send_for_real(args, people, by_household, rules, audit_path, sender)
+
     pairs = generate_pairs(people, rules)
-
     print_summary(people, by_household, avoid)
+    segments = check_message_length(people, rules, by_household, args.note)
+    print(f"Longest possible text: {segments} SMS segment(s).")
 
-    if args.reveal:
-        for gifter, giftee in sorted(pairs.items(), key=lambda kv: kv[0].name):
-            print(f"  {gifter.name} -> {giftee.name}")
-        return 0
+    if args.send:  # --dry-run
+        print("\nDry run: throwaway pairings, nothing saved.\n")
+        with ConsoleSender() as sender:
+            return deliver(throwaway_entries(pairs), people, by_household, sender, args.note)
 
     if args.test_email:
-        test_sender = sender or EmailSender(args.test_email)
         print(f"\nTrial run: emailing {len(pairs)} would-be texts to {args.test_email}. "
               "These pairings are throwaway and are not saved.")
-        try:
-            return deliver(args, pairs, by_household, test_sender)
-        finally:
-            getattr(test_sender, "close", lambda: None)()
+        with EmailSender(args.test_email) as sender:
+            return deliver(throwaway_entries(pairs), people, by_household, sender, args.note)
 
-    if not args.send:
-        sample = random.choice(people)
-        print("\nSample text (match hidden):\n")
-        print(build_message(sample, Person("<their match>", ""), by_household,
-                            args.organizer, args.note))
+    sample = random.choice(people)
+    print("\nSample text (match hidden):\n")
+    print(build_message(sample, Person("<their match>", ""), by_household, args.note))
+    if os.path.exists(audit_path):
+        audit = Audit.load(audit_path)
+        sent = len(audit.entries) - len(audit.unsent())
+        print(f"\n{audit_path}: {sent} of {len(audit.entries)} texts sent. "
+              "Run --send to finish or --status to check delivery.")
+    else:
         print("\nLooks good. Run with --send to text everyone.")
-        return 0
-
-    return send_all(args, people, by_household, pairs, audit_path, get_sender())
+    return 0
 
 
 def print_summary(people, by_household, avoid):
@@ -119,60 +134,136 @@ def print_summary(people, by_household, avoid):
     print("A valid pairing for everyone was found.")
 
 
-def send_all(args, people, by_household, pairs, audit_path, sender):
+def throwaway_entries(pairs):
+    return Audit.new(None, pairs).entries
+
+
+def send_for_real(args, people, by_household, rules, audit_path, sender):
     missing = [p.name for p in people if not p.phone]
     if missing:
         raise ValueError(f"Add phone numbers for {', '.join(missing)} before sending")
 
-    if not args.dry_run:
-        if os.path.exists(audit_path) and not args.force:
+    if os.path.exists(audit_path) and not args.force:
+        audit = Audit.load(audit_path)
+        check_matches_people(audit, people)
+        if args.note is not None and args.note != audit.note:
             raise ValueError(
-                f"{audit_path} already exists, so pairings may already have gone out. "
-                "Use --resend NAME to re-text someone, or --force to start over.")
-        quota = sender.quota_remaining()
-        if quota is not None and quota < len(pairs):
-            raise SendError(
-                f"Textbelt key has {quota} texts left but {len(pairs)} are needed")
-        # Save before sending so a partial failure can be fixed with --resend.
-        with open(audit_path, "w") as f:
-            for gifter, giftee in pairs.items():
-                print(f"gifter:{gifter.name} giftee:{giftee.name}", file=f)
-        print(f"Saved pairings to {audit_path} (don't peek if you're playing!)")
+                f"These pairings were drawn with --note {audit.note!r}. Rerun without "
+                "--note (the saved one is reused) so everyone gets the same text.")
+        print(f"Resuming {audit_path}: "
+              f"{len(audit.entries) - len(audit.unsent())} of {len(audit.entries)} already sent.")
+    else:
+        if os.path.exists(audit_path):
+            print(f"--force: replacing {audit_path} with a new draw.")
+        audit = Audit.new(audit_path, generate_pairs(people, rules), args.note)
 
-    return deliver(args, pairs, by_household, sender)
+    pending = audit.unsent()
+    if not pending:
+        print("Everyone has been sent their match. Use --status to check delivery.")
+        return 0
+
+    by_name = {p.name.lower(): p for p in people}
+    segments = max(sms_segments(build_message(
+        by_name[e.gifter.lower()], by_name[e.giftee.lower()], by_household, audit.note))
+        for e in pending)
+    if segments > MAX_SEGMENTS:
+        raise ValueError(f"Some texts would be {segments} SMS segments; shorten the note.")
+    quota = sender.quota_remaining()
+    needed = len(pending) * segments  # in case Textbelt bills per segment
+    if quota is not None and quota < needed:
+        raise SendError(f"Textbelt key has {quota} credits left; need up to {needed}")
+
+    audit.save()
+    print(f"Pairings saved to {audit_path} (don't peek if you're playing!)")
+    return deliver(pending, people, by_household, sender, audit.note, audit.save)
 
 
-def deliver(args, pairs, by_household, sender):
+def check_matches_people(audit, people):
+    names = {p.name.lower() for p in people}
+    in_audit = {e.gifter.lower() for e in audit.entries}
+    if names != in_audit:
+        raise ValueError(
+            f"The participant list changed since {audit.path} was drawn. "
+            "Use --force to redraw (people already texted would get a new match).")
+
+
+def deliver(entries, people, by_household, sender, note, save=lambda: None):
+    by_name = {p.name.lower(): p for p in people}
     failures = []
-    for gifter, giftee in pairs.items():
-        message = build_message(gifter, giftee, by_household, args.organizer, args.note)
+    for entry in entries:
+        gifter, giftee = by_name[entry.gifter.lower()], by_name[entry.giftee.lower()]
+        message = build_message(gifter, giftee, by_household, note)
         try:
-            sender.send(gifter.phone, message)
+            entry.mark_sent(gifter.phone, sender.send(gifter.phone, message))
             print(f"  sent to {gifter.name}")
         except SendError as e:
+            entry.mark_failed(gifter.phone, e)
             failures.append(gifter.name)
             print(f"  FAILED for {gifter.name}: {e}", file=sys.stderr)
+        save()
 
     if failures:
-        hint = " Retry each with: --resend NAME" if args.send else ""
-        print(f"\n{len(failures)} message(s) failed.{hint}", file=sys.stderr)
+        print(f"\n{len(failures)} message(s) failed. Rerun the same command to retry "
+              "just those.", file=sys.stderr)
         return 1
-    print(f"\nAll {len(pairs)} messages sent.")
+    print(f"\nAll {len(entries)} messages sent.")
     return 0
 
 
 def resend(args, people, by_household, audit_path, sender):
+    audit = Audit.load(audit_path)
+    entry = audit.find(args.resend)
     by_name = {p.name.lower(): p for p in people}
-    pairs = dict(load_previous_pairs(audit_path))
-    key = args.resend.lower()
-    if key not in by_name or key not in pairs:
-        raise ValueError(f"{args.resend} isn't in both {args.file} and {audit_path}")
-    gifter, giftee = by_name[key], by_name[pairs[key]]
+    gifter = by_name.get(entry.gifter.lower())
+    giftee = by_name.get(entry.giftee.lower())
+    if not gifter or not giftee:
+        raise ValueError(f"{entry.gifter} or their match is missing from {args.file}")
     if not gifter.phone:
         raise ValueError(f"No phone number for {gifter.name}")
-    sender.send(gifter.phone, build_message(gifter, giftee, by_household,
-                                            args.organizer, args.note))
+    message = build_message(gifter, giftee, by_household, audit.note)
+    try:
+        entry.mark_sent(gifter.phone, sender.send(gifter.phone, message))
+    except SendError as e:
+        entry.mark_failed(gifter.phone, e)
+        raise
+    finally:
+        if not args.dry_run:
+            audit.save()
     print(f"Re-sent {gifter.name}'s match.")
+    return 0
+
+
+def check_status(audit_path, sender):
+    audit = Audit.load(audit_path)
+    problems = 0
+    for entry in audit.entries:
+        if entry.status == SENT and entry.text_id and entry.delivery != "DELIVERED":
+            try:
+                entry.delivery = sender.delivery_status(entry.text_id)
+            except SendError as e:
+                entry.delivery = f"unknown ({e})"
+        if entry.status == SENT:
+            shown = entry.delivery or "sent (no delivery info)"
+        elif entry.status == FAILED:
+            shown = f"FAILED to send: {entry.error}"
+        else:
+            shown = "not sent yet"
+        if entry.delivery != "DELIVERED":
+            problems += 1
+        print(f"  {entry.gifter:<12} {shown}")
+    audit.save()
+    if problems:
+        print(f"\n{problems} not confirmed delivered. Carriers can be slow to report; "
+              "check again later, or --resend NAME.")
+        return 1
+    print(f"\nAll {len(audit.entries)} texts delivered.")
+    return 0
+
+
+def reveal(audit_path):
+    audit = Audit.load(audit_path)
+    for entry in sorted(audit.entries, key=lambda e: e.gifter):
+        print(f"  {entry.gifter} -> {entry.giftee}")
     return 0
 
 

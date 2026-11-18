@@ -1,19 +1,20 @@
-"""Text message delivery via Textbelt (https://textbelt.com).
+"""Ways to deliver the secret santa messages.
 
-Textbelt needs no phone number registration, unlike SNS and Twilio, which now
-require a verified toll-free or 10DLC number to text US phones. Buy a key at
-textbelt.com and export it as TEXTBELT_KEY.
+TextbeltSender texts people for real (https://textbelt.com). Textbelt needs no
+phone number registration, unlike SNS and Twilio, which now require a verified
+toll-free or 10DLC number to text US phones. Buy a key and export TEXTBELT_KEY.
 
-Test runs go to email instead (EmailSender), so they cost nothing.
+EmailSender sends trial runs to one email address, and ConsoleSender prints.
+Every sender is a context manager, so `with make_sender() as s:` cleans up.
 """
 
 import json
 import os
 import smtplib
 import urllib.error
-from email.message import EmailMessage
 import urllib.parse
 import urllib.request
+from email.message import EmailMessage
 
 TEXTBELT_URL = "https://textbelt.com"
 
@@ -22,17 +23,35 @@ class SendError(Exception):
     pass
 
 
-class TextbeltSender:
+class Sender:
+    def send(self, phone, message):
+        """Deliver `message`; return an id that `delivery_status` understands, or None."""
+        raise NotImplementedError
+
+    def quota_remaining(self):
+        """Texts left on the account, or None if unlimited or unknown."""
+        return None
+
+    def delivery_status(self, message_id):
+        """Carrier delivery status for a sent message, or None if unsupported."""
+        return None
+
+    def close(self):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+class TextbeltSender(Sender):
     def __init__(self, key, timeout=30):
         if not key:
             raise SendError("Set TEXTBELT_KEY (buy a key at https://textbelt.com).")
         self.key = key
         self.timeout = timeout
-
-    def quota_remaining(self):
-        url = f"{TEXTBELT_URL}/quota/{urllib.parse.quote(self.key)}"
-        data = self._request(urllib.request.Request(url))
-        return data.get("quotaRemaining")
 
     def send(self, phone, message):
         body = urllib.parse.urlencode(
@@ -43,15 +62,28 @@ class TextbeltSender:
             raise SendError(data.get("error") or "Textbelt reported a failure")
         return data.get("textId")
 
+    def quota_remaining(self):
+        data = self._request(urllib.request.Request(
+            f"{TEXTBELT_URL}/quota/{urllib.parse.quote(self.key)}"))
+        if not data.get("success", True):
+            raise SendError(data.get("error") or "Textbelt rejected the key")
+        return data.get("quotaRemaining")
+
+    def delivery_status(self, message_id):
+        """One of DELIVERED, SENT, SENDING, FAILED, UNKNOWN."""
+        data = self._request(urllib.request.Request(
+            f"{TEXTBELT_URL}/status/{urllib.parse.quote(str(message_id))}"))
+        return data.get("status")
+
     def _request(self, request):
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as resp:
                 return json.load(resp)
-        except urllib.error.URLError as e:
+        except (urllib.error.URLError, OSError, ValueError) as e:
             raise SendError(f"Could not reach Textbelt: {e}") from e
 
 
-class EmailSender:
+class EmailSender(Sender):
     """Emails each would-be text to one test address, for trial runs.
 
     SMTP settings come from the environment:
@@ -72,9 +104,6 @@ class EmailSender:
             raise SendError("Set SMTP_USER and SMTP_PASSWORD to send test emails.")
         self._smtp = None
 
-    def quota_remaining(self):
-        return None
-
     def send(self, phone, message):
         msg = EmailMessage()
         msg["Subject"] = f"[Secret Santa test] text for {phone or 'no phone'}"
@@ -89,7 +118,7 @@ class EmailSender:
             self._smtp.send_message(msg)
         except (smtplib.SMTPException, OSError) as e:
             raise SendError(f"Email failed: {e}") from e
-        return "email"
+        return None
 
     def close(self):
         if self._smtp is not None:
@@ -100,12 +129,9 @@ class EmailSender:
             self._smtp = None
 
 
-class ConsoleSender:
+class ConsoleSender(Sender):
     """Prints messages instead of sending them."""
-
-    def quota_remaining(self):
-        return None
 
     def send(self, phone, message):
         print(f"To {phone}:\n{'-' * 30}\n{message}\n{'-' * 30}")
-        return "console"
+        return None

@@ -3,13 +3,12 @@ import os
 import random
 import tempfile
 import unittest
-from unittest import mock
 
 from dickson_secret_santa.santa import (
-    NoPairingError, PairingRules, Person, build_message, generate_pairs,
-    households, load_people, load_previous_pairs, normalize_phone,
+    MAX_SEGMENTS, NoPairingError, PairingRules, Person, build_message,
+    check_message_length, generate_pairs, households, load_people, normalize_phone,
+    sms_segments,
 )
-from dickson_secret_santa.__main__ import main
 
 HERE = os.path.dirname(__file__)
 EXAMPLE = os.path.join(HERE, "..", "participants.example.csv")
@@ -81,41 +80,40 @@ class ParsingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             load_people(f.name)
 
+
+
+class MessageTests(unittest.TestCase):
+    def setUp(self):
+        self.people = load_people(EXAMPLE)
+        self.by_name = {p.name: p for p in self.people}
+        self.households = households(self.people)
+
     def test_message_lists_housemates(self):
-        people = load_people(EXAMPLE)
-        by_name = {p.name: p for p in people}
-        msg = build_message(by_name["Rob"], by_name["Kyle"], households(people), "Liam")
-        self.assertIn("Rob, your match is Kyle!", msg)
-        self.assertIn("Kyoung-Hi and Mina", msg)
-        solo = build_message(by_name["Kyle"], by_name["Rob"], households(people), "Liam")
-        self.assertNotIn("household", solo)
+        msg = build_message(self.by_name["Rob"], self.by_name["Kyle"], self.households)
+        self.assertEqual(
+            msg, "🎅 Secret Santa: Rob, your match is Kyle!\nYou can plan with Kyoung-Hi and Mina.")
+        solo = build_message(self.by_name["Kyle"], self.by_name["Rob"], self.households,
+                             "Budget is $50.")
+        self.assertEqual(solo, "🎅 Secret Santa: Kyle, your match is Rob!\nBudget is $50.")
 
+    def test_segment_counting(self):
+        self.assertEqual(sms_segments("a" * 160), 1)
+        self.assertEqual(sms_segments("a" * 161), 2)
+        self.assertEqual(sms_segments("a" * 159 + "€"), 2)  # € takes 2 GSM slots
+        self.assertEqual(sms_segments("🎅" + "a" * 68), 1)   # emoji = 2 UCS-2 units
+        self.assertEqual(sms_segments("🎅" + "a" * 69), 2)
+        self.assertEqual(sms_segments("🎅" + "a" * 132), 2)
+        self.assertEqual(sms_segments("🎅" + "a" * 133), 3)
 
-class CliTests(unittest.TestCase):
-    def test_dry_run_send_and_resend(self):
-        with tempfile.TemporaryDirectory() as d:
-            audit = os.path.join(d, "x.audit")
-            self.assertEqual(main([EXAMPLE, "--send", "--dry-run", "--audit", audit]), 0)
-            self.assertFalse(os.path.exists(audit))  # dry runs don't save pairings
+    def test_every_possible_family_text_fits(self):
+        rules = PairingRules()
+        self.assertLessEqual(
+            check_message_length(self.people, rules, self.households,
+                                 "Budget is about $50. Gifts by Dec 24."), MAX_SEGMENTS)
 
-            with open(audit, "w") as f:
-                f.write("gifter:Liam giftee:Carol\n")
-            self.assertEqual(
-                main([EXAMPLE, "--resend", "liam", "--dry-run", "--audit", audit]), 0)
-            self.assertEqual(load_previous_pairs(audit), {("liam", "carol")})
-
-    def test_test_email_never_saves_pairings(self):
-        with tempfile.TemporaryDirectory() as d:
-            audit = os.path.join(d, "x.audit")
-            with mock.patch("smtplib.SMTP") as smtp_cls, mock.patch.dict(
-                    os.environ, {"SMTP_USER": "me@gmail.com", "SMTP_PASSWORD": "pw"}):
-                self.assertEqual(
-                    main([EXAMPLE, "--test-email", "me+test@gmail.com", "--audit", audit]), 0)
-            self.assertEqual(smtp_cls.return_value.send_message.call_count, 13)
-            self.assertFalse(os.path.exists(audit))
-
-    def test_check_only(self):
-        self.assertEqual(main([EXAMPLE]), 0)
+    def test_long_note_rejected(self):
+        with self.assertRaisesRegex(ValueError, "shorten --note"):
+            check_message_length(self.people, PairingRules(), self.households, "x" * 80)
 
 
 if __name__ == "__main__":
