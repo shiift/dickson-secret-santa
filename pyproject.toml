@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dickson-secret-santa"
+version = "0.3.0"
+description = "Dickson family secret santa picker that texts everyone their match"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Liam Dickson" }]
+requires-python = ">=3.10"
+dependencies = []
+keywords = ["secret santa", "gift exchange"]
+classifiers = [
+    "Environment :: Console",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+]
+
+[project.urls]
+Homepage = "https://github.com/shiift/dickson-secret-santa"
+
+[project.scripts]
+dickson_secret_santa = "dickson_secret_santa.__main__:main"
+
+[tool.setuptools]
+packages = ["dickson_secret_santa"]

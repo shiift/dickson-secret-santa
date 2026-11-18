@@ -1,0 +1,16 @@
+# name, household, phone
+# Copy to participants.csv (which git ignores) and fill in real numbers.
+# People in the same household never draw each other.
+Rob, Song Dickson, +12065550101
+Kyoung-Hi, Song Dickson, +12065550102
+Mina, Song Dickson, +12065550103
+Carol, Nana, +12065550104
+Chris, Chris, +12065550105
+Tim, Tim, +12065550106
+Lydia, Tim, +12065550107
+Jeff, Klotzkin, +12065550108
+Jeanine, Klotzkin, +12065550109
+Eliza, Eliza, +12065550110
+Kyle, Kyle, +12065550111
+Liam, Liam, +12065550112
+Eileen, Liam, +12065550113
