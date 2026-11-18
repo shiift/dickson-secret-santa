@@ -109,4 +109,5 @@ venv.bak/
 # project specific
 .vscode
 dickson_family.txt*
+participants.csv*
 fam.txt*

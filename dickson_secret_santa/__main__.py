@@ -1,140 +1,175 @@
 import argparse
-import sys
+import datetime
+import os
 import random
-import csv
-import time
-import boto3
+import sys
 
-def main():
-    arg_parser = argparse.ArgumentParser(description='Generates a list of people pairings for a secret santa exchange.')
+from .santa import (
+    Person, PairingRules, NoPairingError, build_message, generate_pairs,
+    households, load_people, load_previous_pairs, normalize_phone,
+)
+from .sms import ConsoleSender, SendError, TextbeltSender
 
-    arg_parser.add_argument('file', help='path to the csv containing a list of people for the exchange')
-    arg_parser.add_argument(
-        '-f', '--no-family-match',
-        help='do not match families for the exchange (uses surname)',
-        dest='no_family_match',
-        action='store_true'
-    )
-    arg_parser.add_argument(
-        '-r', '--no-reversals',
-        help='do not match people to each other',
-        dest='no_reversal_match',
-        action='store_true'
-    )
-    arg_parser.add_argument(
-        '-s', '--send',
-        help='send text message to gifters about their giftee',
-        dest='send',
-        action='store_true'
-    )
-    arg_parser.add_argument(
-        '-d', '--dry-run',
-        help='does not use aws resources, instead prints to console',
-        dest='dry_run',
-        action='store_true'
-    )
-    args = arg_parser.parse_args()
 
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(
+        prog="dickson_secret_santa",
+        description="Generates secret santa pairings and texts each gifter their match.",
+        epilog="With no action flag, the script only checks the list and makes "
+               "sure a valid pairing exists. Nothing is sent and no pairings are shown.")
+    p.add_argument("file", help="CSV of participants: name, household, phone")
+
+    rules = p.add_argument_group("pairing rules")
+    rules.add_argument("--allow-family-match", action="store_true",
+                       help="allow people to draw someone from their own household")
+    rules.add_argument("--allow-reversals", action="store_true",
+                       help="allow two people to draw each other")
+    rules.add_argument("--avoid", metavar="AUDIT_FILE", action="append", default=[],
+                       help="avoid repeating pairings from a previous year's audit file "
+                            "(repeatable)")
+
+    msg = p.add_argument_group("message")
+    msg.add_argument("--organizer", default="Liam",
+                     help="name people should contact with questions (default: Liam)")
+    msg.add_argument("--note", help="extra line for the text, e.g. 'Budget is $50.'")
+
+    act = p.add_argument_group("actions (pick one)").add_mutually_exclusive_group()
+    act.add_argument("--send", action="store_true",
+                     help="generate pairings, save the audit file, and text everyone")
+    act.add_argument("--test-to", metavar="PHONE",
+                     help="text a sample message with a made-up match to PHONE")
+    act.add_argument("--resend", metavar="NAME",
+                     help="re-text NAME their match from the saved audit file")
+    act.add_argument("--reveal", action="store_true",
+                     help="print every pairing to the console (spoils it for you!)")
+
+    p.add_argument("--audit", metavar="PATH",
+                   help="audit file location (default: FILE.<year>.audit)")
+    p.add_argument("--force", action="store_true",
+                   help="overwrite an existing audit file when sending")
+    p.add_argument("--dry-run", action="store_true",
+                   help="with --send/--test-to/--resend, print texts instead of sending")
+    return p.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    try:
+        return run(args)
+    except (ValueError, NoPairingError, SendError, FileNotFoundError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
+
+def run(args):
     people = load_people(args.file)
-    random.shuffle(people, random.seed(time.time()))
-    matches = calculate_gift_pairs(people, people.copy(), args.no_family_match, args.no_reversal_match)
-    if not matches:
-        print("no matches found")
-        return
-    if args.send:
-        if args.no_family_match:
-            people_by_household = construct_households(people)
-        sns_client = boto3.client('sns', region_name='us-east-1')
-        send_sms(sns_client, matches, people_by_household, args.dry_run)
-    print_audit_log(args.file + '.audit', matches)
+    by_household = households(people)
+    audit_path = args.audit or f"{args.file}.{datetime.date.today().year}.audit"
+    sender = ConsoleSender() if args.dry_run else None
 
-def print_audit_log(audit_log_file, matches):
-    with open(audit_log_file, 'w') as audit_file:
-        for giftee, gifter in matches.items():
-            print('gifter:{} giftee:{}'.format(gifter, giftee), file=audit_file)
+    def get_sender():
+        return sender or TextbeltSender(os.environ.get("TEXTBELT_KEY"))
 
-def construct_households(people):
-    people_by_household = {}
-    for person in people:
-        if person.family in people_by_household:
-            people_by_household[person.family].append(person)
-        else:
-            people_by_household[person.family] = [person]
-    return people_by_household
+    if args.resend:
+        return resend(args, people, by_household, audit_path, get_sender())
 
-def send_sms(sns_client, matches, people_by_household, dry_run):
-    for giftee, gifter in matches.items():
-        household_names = None
-        if people_by_household:
-            people_in_household = people_by_household[gifter.family]
-            household_excluding_gifter = list(map(lambda x: str(x), filter(lambda x: x is not gifter, people_in_household)))
-            if household_excluding_gifter:
-                household_names = 'You cannot be matched with anyone in your "household group". So feel free to plan your gifts with: {}. '.format(
-                    ', '.join(household_excluding_gifter))
-        information = 'Reach out to Liam with any questions.'
-        message = '🎅❄️ Secret Santa ❄️🎅\n\n{gifter}, your match is {giftee}!\n\n{household_names}{information}'.format(
-            gifter=gifter, giftee=giftee, household_names=household_names or "", information=information)
-        message_attribtues = {
-            "AWS.SNS.SMS.MaxPrice": {
-                "DataType": "Number",
-                "StringValue": "10.00"
-            }
-        }
-        if dry_run:
-            print("To phone: {}\n--------\n{}\n--------".format(gifter.phone, message))
-        else:
-            sns_client.publish(PhoneNumber=gifter.phone, Message=message, MessageAttributes=message_attribtues)
+    if args.test_to:
+        phone = normalize_phone(args.test_to)
+        tester = Person("Test", "__test__", phone)
+        message = build_message(tester, Person("Santa Claus", "North Pole"),
+                                {}, args.organizer, args.note)
+        text_id = get_sender().send(phone, "[TEST] " + message)
+        print(f"Test text sent to {phone} (id {text_id}).")
+        return 0
 
-def calculate_gift_pairs(gifters, giftees, no_family_match, no_reversal_match, matches = {}, gifter_index = 0):
-    if gifter_index >= len(gifters):
-        return matches
-    gifter = gifters[gifter_index]
-    for giftee in giftees:
-        if gifter is giftee:
-            continue
-        if giftee in matches:
-            continue
-        if no_family_match and gifter.family == giftee.family:
-            continue
-        if no_reversal_match and gifter in matches and matches[gifter] is giftee:
-            continue
-        matches[giftee] = gifter
-        match = calculate_gift_pairs(gifters, giftees, no_family_match, no_reversal_match, matches, gifter_index + 1)
-        if match:
-            return matches
-        del matches[giftee]
-    return None
+    avoid = set()
+    for f in args.avoid:
+        avoid |= load_previous_pairs(f)
+    rules = PairingRules(args.allow_family_match, args.allow_reversals, avoid)
+    pairs = generate_pairs(people, rules)
 
-def load_people(filename):
-    people = []
-    with open(filename) as people_file:
-        reader = csv.reader(people_file, skipinitialspace=True)
-        for row in reader:
-            if len(row) < 2 or len(row) > 3:
-                raise ValueError("{} has incorrect format: expecting name, family name, phone number.".format(row))
+    print_summary(people, by_household, avoid)
 
-            if len(row) == 3:
-                name, family, phone = row
-            else:
-                phone = None
-                name, family = row
-            person = Person(name, family, phone)
+    if args.reveal:
+        for gifter, giftee in sorted(pairs.items(), key=lambda kv: kv[0].name):
+            print(f"  {gifter.name} -> {giftee.name}")
+        return 0
 
-            people.append(person)
-    return people
+    if not args.send:
+        sample = random.choice(people)
+        print("\nSample text (match hidden):\n")
+        print(build_message(sample, Person("<their match>", ""), by_household,
+                            args.organizer, args.note))
+        print("\nLooks good. Run with --send to text everyone.")
+        return 0
 
-class Person():
-    def __init__(self, name, family, phone):
-        self.name = name
-        self.family = family
-        self.phone = phone
+    return send_all(args, people, by_household, pairs, audit_path, get_sender())
 
-    def __str__(self):
-        return self.name
 
-    def __repr__(self):
-        return "{name} ({family}), tel: {phone}".format(name=self.name, family=self.family, phone=self.phone)
+def print_summary(people, by_household, avoid):
+    print(f"{len(people)} people in {len(by_household)} households:")
+    for family, members in by_household.items():
+        print(f"  {family}: {', '.join(m.name for m in members)}")
+    missing = [p.name for p in people if not p.phone]
+    if missing:
+        print(f"WARNING: no phone number for {', '.join(missing)}")
+    if avoid:
+        print(f"Avoiding {len(avoid)} pairings from previous years.")
+    print("A valid pairing for everyone was found.")
 
-if __name__ == '__main__':
-    main()
-    
+
+def send_all(args, people, by_household, pairs, audit_path, sender):
+    missing = [p.name for p in people if not p.phone]
+    if missing:
+        raise ValueError(f"Add phone numbers for {', '.join(missing)} before sending")
+
+    if not args.dry_run:
+        if os.path.exists(audit_path) and not args.force:
+            raise ValueError(
+                f"{audit_path} already exists, so pairings may already have gone out. "
+                "Use --resend NAME to re-text someone, or --force to start over.")
+        quota = sender.quota_remaining()
+        if quota is not None and quota < len(pairs):
+            raise SendError(
+                f"Textbelt key has {quota} texts left but {len(pairs)} are needed")
+        # Save before sending so a partial failure can be fixed with --resend.
+        with open(audit_path, "w") as f:
+            for gifter, giftee in pairs.items():
+                print(f"gifter:{gifter.name} giftee:{giftee.name}", file=f)
+        print(f"Saved pairings to {audit_path} (don't peek if you're playing!)")
+
+    failures = []
+    for gifter, giftee in pairs.items():
+        message = build_message(gifter, giftee, by_household, args.organizer, args.note)
+        try:
+            sender.send(gifter.phone, message)
+            print(f"  sent to {gifter.name}")
+        except SendError as e:
+            failures.append(gifter.name)
+            print(f"  FAILED for {gifter.name}: {e}", file=sys.stderr)
+
+    if failures:
+        print(f"\n{len(failures)} text(s) failed. Retry each with: --resend NAME",
+              file=sys.stderr)
+        return 1
+    print(f"\nAll {len(pairs)} texts sent.")
+    return 0
+
+
+def resend(args, people, by_household, audit_path, sender):
+    by_name = {p.name.lower(): p for p in people}
+    pairs = dict(load_previous_pairs(audit_path))
+    key = args.resend.lower()
+    if key not in by_name or key not in pairs:
+        raise ValueError(f"{args.resend} isn't in both {args.file} and {audit_path}")
+    gifter, giftee = by_name[key], by_name[pairs[key]]
+    if not gifter.phone:
+        raise ValueError(f"No phone number for {gifter.name}")
+    sender.send(gifter.phone, build_message(gifter, giftee, by_household,
+                                            args.organizer, args.note))
+    print(f"Re-sent {gifter.name}'s match.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
